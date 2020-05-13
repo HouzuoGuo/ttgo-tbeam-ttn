@@ -4,7 +4,32 @@
 #include <SPI.h>
 #include <lmic.h>
 #include <hal/hal.h>
+
+// static const u1_t PROGMEM NWKSKEY[16], APPSKEY[16], u4_t DEVADDR.
 #include "keys.h"
+
+/*
+Payload decoder (from https://github.com/kizniche/ttgo-tbeam-ttn-tracker):
+function Decoder(bytes, port) {
+    var decoded = {};
+
+    decoded.latitude = ((bytes[0]<<16)>>>0) + ((bytes[1]<<8)>>>0) + bytes[2];
+    decoded.latitude = (decoded.latitude / 16777215.0 * 180) - 90;
+
+    decoded.longitude = ((bytes[3]<<16)>>>0) + ((bytes[4]<<8)>>>0) + bytes[5];
+    decoded.longitude = (decoded.longitude / 16777215.0 * 360) - 180;
+
+    var altValue = ((bytes[6]<<8)>>>0) + bytes[7];
+    var sign = bytes[6] & (1 << 7);
+    if(sign) decoded.altitude = 0xFFFF0000 | altValue;
+    else decoded.altitude = altValue;
+
+    decoded.hdop = bytes[8] / 10.0;
+    decoded.sats = bytes[9];
+
+    return decoded;
+}
+*/
 
 #define EV_QUEUED 100
 #define EV_PENDING 101
@@ -63,6 +88,7 @@ void onEvent(ev_t event)
     }
     break;
   default:
+    Serial.printf("Other event: %d\n", event);
     break;
   }
   _ttn_callback(event);
@@ -74,74 +100,6 @@ void ttn_response(uint8_t *buffer, size_t len)
   {
     buffer[i] = LMIC.frame[LMIC.dataBeg + i];
   }
-}
-
-void ttn_join()
-{
-  LMIC_reset();
-  uint8_t appskey[sizeof(APPSKEY)];
-  uint8_t nwkskey[sizeof(NWKSKEY)];
-  memcpy_P(appskey, APPSKEY, sizeof(APPSKEY));
-  memcpy_P(nwkskey, NWKSKEY, sizeof(NWKSKEY));
-  LMIC_setSession(0x1, DEVADDR, nwkskey, appskey);
-
-  LMIC_setupChannel(0, 868100000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
-  LMIC_setupChannel(1, 868300000, DR_RANGE_MAP(DR_SF12, DR_SF7B), BAND_CENTI);
-  LMIC_setupChannel(2, 868500000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
-  LMIC_setupChannel(3, 867100000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
-  LMIC_setupChannel(4, 867300000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
-  LMIC_setupChannel(5, 867500000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
-  LMIC_setupChannel(6, 867700000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
-  LMIC_setupChannel(7, 867900000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
-  LMIC_setupChannel(8, 868800000, DR_RANGE_MAP(DR_FSK, DR_FSK), BAND_MILLI);
-
-  LMIC_setLinkCheckMode(0);
-  LMIC.dn2Dr = DR_SF8;
-  LMIC_setDrTxpow(DR_SF8, 20);
-  _ttn_callback(EV_JOINED);
-}
-RTC_DATA_ATTR uint32_t count = 0;
-uint8_t txBuffer[10];
-
-void send()
-{
-  uint32_t LatitudeBinary;
-  uint32_t LongitudeBinary;
-  uint16_t altitudeGps;
-  uint8_t hdopGps;
-  uint8_t sats;
-  LatitudeBinary = ((60.15 + 90) / 180.0) * 16777215;
-  LongitudeBinary = ((24.91 + 180) / 360.0) * 16777215;
-  altitudeGps = 30.0;
-  hdopGps = 5.0;
-  sats = 1;
-  txBuffer[0] = (LatitudeBinary >> 16) & 0xFF;
-  txBuffer[1] = (LatitudeBinary >> 8) & 0xFF;
-  txBuffer[2] = LatitudeBinary & 0xFF;
-  txBuffer[3] = (LongitudeBinary >> 16) & 0xFF;
-  txBuffer[4] = (LongitudeBinary >> 8) & 0xFF;
-  txBuffer[5] = LongitudeBinary & 0xFF;
-  txBuffer[6] = (altitudeGps >> 8) & 0xFF;
-  txBuffer[7] = altitudeGps & 0xFF;
-  txBuffer[8] = hdopGps & 0xFF;
-  txBuffer[9] = sats & 0xFF;
-  /*
-  char *msg = "xxxxxxxxxxxx";
-  for (int i = 10; i< 10+strlen(msg); ++i) {
-    txBuffer[i] = msg[i-10];
-  }
-  */
-
-  bool confirmed = false;
-  LMIC_setSeqnoUp(count);
-  LMIC_setTxData2(10, txBuffer, sizeof(txBuffer), confirmed);
-  if (LMIC.opmode & OP_TXRXPEND)
-  {
-    _ttn_callback(EV_PENDING);
-    return;
-  }
-  _ttn_callback(EV_QUEUED);
-  count++;
 }
 
 void callback(uint8_t message)
@@ -190,24 +148,83 @@ void callback(uint8_t message)
 
 void setup()
 {
+  while (!Serial)
+    ;
   Serial.begin(115200);
   SPI.begin(SCK_GPIO, MISO_GPIO, MOSI_GPIO, NSS_GPIO);
-  os_init_ex((const void *)&lmic_pins);
+  os_init();
+  LMIC_reset();
+
   _lmic_callbacks.push_back(callback);
-  ttn_join();
-  LMIC_setDrTxpow(DR_SF8, 20);
+  uint8_t appskey[sizeof(APPSKEY)];
+  uint8_t nwkskey[sizeof(NWKSKEY)];
+  memcpy_P(appskey, APPSKEY, sizeof(APPSKEY));
+  memcpy_P(nwkskey, NWKSKEY, sizeof(NWKSKEY));
+  LMIC_setSession(0x1, DEVADDR, nwkskey, appskey);
+  LMIC_setupChannel(0, 868100000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
+  LMIC_setupChannel(1, 868300000, DR_RANGE_MAP(DR_SF12, DR_SF7B), BAND_CENTI);
+  LMIC_setupChannel(2, 868500000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
+  LMIC_setupChannel(3, 867100000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
+  LMIC_setupChannel(4, 867300000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
+  LMIC_setupChannel(5, 867500000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
+  LMIC_setupChannel(6, 867700000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
+  LMIC_setupChannel(7, 867900000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
+  LMIC_setupChannel(8, 868800000, DR_RANGE_MAP(DR_FSK, DR_FSK), BAND_MILLI);
+
   LMIC_setAdrMode(0);
-  LMIC_setLinkCheckMode(1);
   LMIC_setLinkCheckMode(0);
+  LMIC.dn2Dr = SF7;
+  LMIC_setDrTxpow(DR_SF7, 20);
+  LMIC_setClockError(MAX_CLOCK_ERROR * 10 / 100);
+
+  _ttn_callback(EV_JOINED);
 }
 
+static uint32_t count = 0;
 void loop()
 {
   os_runloop_once();
   static uint32_t last = 0;
-  if (0 == last || millis() - last > 5000)
+  if (0 == last || millis() - last > 10000)
   {
     last = millis();
-    send();
+    uint32_t LatitudeBinary;
+    uint32_t LongitudeBinary;
+    uint16_t altitudeGps;
+    uint8_t hdopGps;
+    uint8_t sats;
+    LatitudeBinary = ((60.15 + 90) / 180.0) * 16777215;
+    LongitudeBinary = ((24.91 + 180) / 360.0) * 16777215;
+    altitudeGps = 30.0;
+    hdopGps = 5.0;
+    sats = 1;
+
+    uint8_t txBuffer[10];
+    txBuffer[0] = (LatitudeBinary >> 16) & 0xFF;
+    txBuffer[1] = (LatitudeBinary >> 8) & 0xFF;
+    txBuffer[2] = LatitudeBinary & 0xFF;
+    txBuffer[3] = (LongitudeBinary >> 16) & 0xFF;
+    txBuffer[4] = (LongitudeBinary >> 8) & 0xFF;
+    txBuffer[5] = LongitudeBinary & 0xFF;
+    txBuffer[6] = (altitudeGps >> 8) & 0xFF;
+    txBuffer[7] = altitudeGps & 0xFF;
+    txBuffer[8] = hdopGps & 0xFF;
+    txBuffer[9] = sats & 0xFF;
+    /*
+    char *msg = "xxxxxxxxxxxx";
+    for (int i = 10; i< 10+strlen(msg); ++i) {
+      txBuffer[i] = msg[i-10];
+    }
+    */
+
+    LMIC_setSeqnoUp(count);
+    LMIC_setTxData2(10, txBuffer, sizeof(txBuffer), false);
+    if (LMIC.opmode & OP_TXRXPEND)
+    {
+      _ttn_callback(EV_PENDING);
+      return;
+    }
+    _ttn_callback(EV_QUEUED);
+    count++;
   }
 }
